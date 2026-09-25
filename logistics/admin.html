@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Andijon Mini-Logistika - Admin</title>
+<!-- Yandex Maps API -->
+<script src="https://api-maps.yandex.ru/2.1/?lang=uz_UZ" type="text/javascript"></script>
+<style>
+  :root{
+    --bg:#0b0f19;--card:#111827;--border:#374151;--accent:#38bdf8;
+    --text:#f3f4f6;--muted:#9ca3af;--danger:#ef4444;--warn:#f59e0b;--ok:#10b981;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',Tahoma,sans-serif}
+  body{background:var(--bg);color:var(--text);padding:16px}
+  h1{color:var(--accent);font-size:1.4rem;margin-bottom:16px}
+  .layout{display:grid;grid-template-columns:1fr 380px;gap:16px}
+  @media (max-width:900px){.layout{grid-template-columns:1fr}}
+  #map{height:520px;border-radius:12px;border:1px solid var(--border)}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;max-height:520px;overflow-y:auto}
+  .tabs{display:flex;gap:8px;margin-bottom:10px}
+  .tab-btn{flex:1;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;font-size:.85rem}
+  .tab-btn.active{background:var(--accent);color:#0b0f19;font-weight:bold}
+  .order-card,.courier-card{background:var(--bg);border:1px solid var(--border);border-left:4px solid var(--accent);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.85rem}
+  .order-card.Yangi{border-left-color:var(--warn)}
+  .order-card.Yetkazildi{border-left-color:var(--ok);opacity:.7}
+  .row{display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+  select,button{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:.8rem}
+  button{cursor:pointer;background:var(--accent);color:#0b0f19;font-weight:bold;border:none}
+  .muted{color:var(--muted)}
+  .badge{font-size:.7rem;padding:2px 6px;border-radius:4px;background:var(--border)}
+</style>
+</head>
+<body>
+
+<h1>🚴 Andijon Mini-Logistika — Boshqaruv paneli</h1>
+
+<div class="layout">
+  <div id="map"></div>
+
+  <div class="panel">
+    <div class="tabs">
+      <div class="tab-btn active" id="tabOrdersBtn" onclick="switchTab('orders')">📦 Buyurtmalar</div>
+      <div class="tab-btn" id="tabCouriersBtn" onclick="switchTab('couriers')">🚴 Kuryerlar</div>
+    </div>
+    <div id="ordersTab"></div>
+    <div id="couriersTab" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const API = "http://127.0.0.1:8000/api";
+let map;
+let courierMarkers = {};
+let ordersCache = [];
+let couriersCache = [];
+
+// Yandex xaritasini ishga tushirish
+ymaps.ready(init);
+
+function init() {
+    map = new ymaps.Map("map", {
+        center: [40.7833, 72.3444], // Andijon markazi
+        zoom: 15,
+        controls: ['zoomControl', 'searchControl', 'typeSelector']
+    });
+
+    refreshAll();
+    setInterval(refreshAll, 3000);
+}
+
+function switchTab(tab){
+  document.getElementById('ordersTab').style.display = tab === 'orders' ? 'block' : 'none';
+  document.getElementById('couriersTab').style.display = tab === 'couriers' ? 'block' : 'none';
+  document.getElementById('tabOrdersBtn').classList.toggle('active', tab === 'orders');
+  document.getElementById('tabCouriersBtn').classList.toggle('active', tab === 'couriers');
+}
+
+async function refreshAll(){
+  try{
+    const [ordersRes, couriersRes] = await Promise.all([
+      fetch(API + "/orders"), fetch(API + "/couriers")
+    ]);
+    ordersCache = (await ordersRes.json()).orders;
+    couriersCache = (await couriersRes.json()).couriers;
+    renderOrders();
+    renderCouriers();
+    updateMap();
+  }catch(e){
+    console.error("API bilan ulanishda xatolik:", e);
+  }
+}
+
+function renderOrders(){
+  const el = document.getElementById('ordersTab');
+  if(ordersCache.length === 0){ el.innerHTML = '<p class="muted">Hozircha buyurtma yo\'q</p>'; return; }
+  el.innerHTML = ordersCache.map(o => `
+    <div class="order-card ${o.status}">
+      <div class="row"><strong>#${o.id} ${o.client_name || ''}</strong><span class="badge">${o.status}</span></div>
+      <div class="muted">📍 ${o.dropoff_address || '-'}</div>
+      <div class="muted">📦 ${o.comment || '-'}</div>
+      <div class="muted">📞 ${o.phone || '-'}</div>
+      <div class="row">
+        <select id="assign-${o.id}">
+          <option value="">Kuryer tayinlash...</option>
+          ${couriersCache.filter(c=>c.active).map(c=>`<option value="${c.id}">${c.name} (${c.status})</option>`).join('')}
+        </select>
+        <button onclick="assignOrder(${o.id})">Tayinlash</button>
+      </div>
+      <div class="row">
+        <button style="background:var(--danger);color:#fff;width:100%" onclick="deleteOrder(${o.id})">🗑 O'chirish</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderCouriers(){
+  const el = document.getElementById('couriersTab');
+  if(couriersCache.length === 0){ el.innerHTML = '<p class="muted">Hozircha kuryer yo\'q</p>'; return; }
+  el.innerHTML = couriersCache.map(c => `
+    <div class="courier-card">
+      <div class="row"><strong>${c.name}</strong><span class="badge">${c.active ? c.status : 'Tasdiqlanmagan'}</span></div>
+      <div class="muted">📞 ${c.phone}</div>
+      ${!c.active ? `<button style="margin-top:6px" onclick="approveCourier(${c.id})">✅ Tasdiqlash</button>` : ''}
+    </div>
+  `).join('');
+}
+
+function updateMap(){
+  if (!map) return;
+
+  couriersCache.forEach(c => {
+    if(!c.lat || !c.lon) return;
+    
+    if(courierMarkers[c.id]){
+      // Kuryer nuqtasi mavjud bo'lsa, koordinatasini yangilaymiz
+      courierMarkers[c.id].geometry.setCoordinates([c.lat, c.lon]);
+      courierMarkers[c.id].properties.set('balloonContent', `${c.name} (${c.status})`);
+    } else {
+      // Yangi kuryer belgisi qo'shamiz
+      let placemark = new ymaps.Placemark([c.lat, c.lon], {
+        balloonContent: `${c.name} (${c.status})`,
+        iconContent: '🚴'
+      }, {
+        preset: 'islands#blueStretchyIcon'
+      });
+      
+      map.geoObjects.add(placemark);
+      courierMarkers[c.id] = placemark;
+    }
+  });
+}
+
+async function assignOrder(orderId){
+  const courierId = document.getElementById('assign-' + orderId).value;
+  if(!courierId){ alert('Kuryer tanlang'); return; }
+  await fetch(`${API}/orders/${orderId}/assign/${courierId}`, { method: 'POST' });
+  refreshAll();
+}
+
+async function deleteOrder(orderId){
+  if(!confirm('Bu buyurtmani o\'chirmoqchimisiz?')) return;
+  await fetch(`${API}/orders/${orderId}`, { method: 'DELETE' });
+  refreshAll();
+}
+
+async function approveCourier(courierId){
+  await fetch(`${API}/couriers/${courierId}/approve`, { method: 'POST' });
+  refreshAll();
+}
+</script>
+</body>
+</html>
